@@ -457,7 +457,7 @@ def decorator_timer(timer):
     print("Decorator timer fired!")
     safe_notification("Decorator Timer", "", "Timer created with @rumps.timer decorator")
 
-@rumps.slider("Decorator Slider", value=25, min_value=0, max_value=50)
+@rumps.slider(value=25, min_value=0, max_value=50)
 def decorator_slider(sender):
     """Example of using the @slider decorator."""
     print(f"Decorator slider: {sender.value}")
