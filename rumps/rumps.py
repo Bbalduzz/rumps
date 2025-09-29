@@ -11,14 +11,19 @@ import Foundation
 import AppKit
 
 from Foundation import (NSDate, NSTimer, NSRunLoop, NSDefaultRunLoopMode, NSSearchPathForDirectoriesInDomains,
-                        NSMakeRect, NSLog, NSObject, NSMutableDictionary, NSString, NSUserDefaults)
-from AppKit import NSApplication, NSStatusBar, NSMenu, NSMenuItem, NSAlert, NSTextField, NSSecureTextField, NSImage, NSSlider, NSSize, NSWorkspace, NSWorkspaceWillSleepNotification, NSWorkspaceDidWakeNotification, NSView
+                        NSMakeRect, NSLog, NSObject, NSMutableDictionary, NSString, NSUserDefaults, NSPoint, NSMakeRange)
+from AppKit import NSApplication, NSStatusBar, NSMenu, NSMenuItem, NSAlert, NSTextField, NSSecureTextField, NSImage, NSImageSymbolConfiguration, NSSlider, NSSize, NSWorkspace, NSWorkspaceWillSleepNotification, NSWorkspaceDidWakeNotification, NSView
+from AppKit import (
+    NSView, NSColor, NSBezierPath, NSRoundLineCapStyle,
+    NSMakeRect, NSMakePoint
+)
 from PyObjCTools import AppHelper
 
 import os
 import pickle
 import traceback
 import weakref
+import objc
 
 from .compat import text_type, string_types, iteritems, collections_abc
 from .text_field import Editing, SecureEditing
@@ -108,7 +113,28 @@ def quit_application(sender=None):
 
 
 def _nsimage_from_file(filename, dimensions=None, template=None):
-    """Take a path to an image file and return an NSImage object."""
+    """Take a path to an image file or SFSymbol instance and return an NSImage object."""
+    # Handle SFSymbol instances
+    if isinstance(filename, SFSymbol):
+        image = filename()  # Call SFSymbol to get NSImage
+        if image is not None:
+            image.setScalesWhenResized_(True)
+            if dimensions is not None:
+                image.setSize_(dimensions)
+            if template is not None:
+                image.setTemplate_(template)
+        return image
+
+    # Handle NSImage instances directly
+    if hasattr(filename, 'setScalesWhenResized_'):  # It's already an NSImage
+        image = filename
+        image.setScalesWhenResized_(True)
+        image.setSize_((20, 20) if dimensions is None else dimensions)
+        if not template is None:
+            image.setTemplate_(template)
+        return image
+
+    # Handle file paths (original behavior)
     try:
         _log('attempting to open image at {0}'.format(filename))
         with open(filename):
@@ -129,6 +155,302 @@ def _nsimage_from_file(filename, dimensions=None, template=None):
     if not template is None:
         image.setTemplate_(template)
     return image
+
+
+# Assuming this is part of a rumps-based application where these are imported elsewhere:
+# from AppKit import NSImage, NSImageSymbolConfiguration, NSColor
+# And _log is defined somewhere in the parent module
+
+class SFSymbol:
+    """Helper class for creating SF Symbol images with extensive customization options.
+    
+    SF Symbols are Apple's system-provided icons that automatically adapt to the current appearance
+    and accessibility settings. They are available on macOS 11.0 and later.
+    """
+    
+    # Constants for weight values (NSFont.Weight equivalents)
+    WEIGHT_MAP = {
+        "ultraLight": -0.8,    # NSFontWeightUltraLight
+        "thin": -0.6,          # NSFontWeightThin
+        "light": -0.4,         # NSFontWeightLight
+        "regular": 0.0,        # NSFontWeightRegular
+        "medium": 0.23,        # NSFontWeightMedium
+        "semibold": 0.3,       # NSFontWeightSemibold
+        "bold": 0.4,           # NSFontWeightBold
+        "heavy": 0.56,         # NSFontWeightHeavy
+        "black": 0.62          # NSFontWeightBlack
+    }
+    
+    # NSImage.SymbolScale values
+    SCALE_MAP = {
+        "small": 1,    # NSImageSymbolScaleSmall
+        "medium": 2,   # NSImageSymbolScaleMedium
+        "large": 3     # NSImageSymbolScaleLarge
+    }
+    
+    # NSImage.SymbolColorRenderingMode values
+    RENDERING_MODE_MAP = {
+        "monochrome": 0,    # NSImageSymbolColorRenderingModeMonochrome
+        "multicolor": 1,    # NSImageSymbolColorRenderingModeMulticolor
+        "hierarchical": 2,  # NSImageSymbolColorRenderingModeHierarchical
+        "palette": 3        # NSImageSymbolColorRenderingModePalette
+    }
+
+    def __init__(self, name, rendering="automatic", color=None, accessibility_description=None,
+                 point_size=None, weight=None, scale=None, text_style=None):
+        """Create an SF Symbol with customization options.
+        
+        :param name: The name of the SF Symbol (e.g., "turtle", "heart.fill", "gear")
+        :param rendering: Symbol rendering mode - "automatic", "monochrome", "hierarchical", "palette", or "multicolor"
+        :param color: Color for the symbol as hex string (e.g., "#ffffff") or RGB tuple (r, g, b) or (r, g, b, a)
+                     Can also be a list of colors for palette mode
+        :param accessibility_description: Optional accessibility description for the symbol
+        :param point_size: Point size for the symbol (CGFloat)
+        :param weight: Font weight - "ultraLight", "thin", "light", "regular", "medium", "semibold", "bold", "heavy", "black"
+        :param scale: Symbol scale - "small", "medium", "large"
+        :param text_style: Text style - "body", "caption1", "caption2", "footnote", "headline", "subheadline", "title1", "title2", "title3"
+        """
+        self.name = name
+        self.rendering = rendering
+        self.color = color
+        self.point_size = point_size
+        self.weight = weight
+        self.scale = scale
+        self.text_style = text_style
+        self.accessibility_description = accessibility_description or name.replace('.', ' ').replace('_', ' ')
+        
+        self._nsimage = self._create_nsimage()
+
+    def _create_nsimage(self):
+        """Create the NSImage from the SF Symbol with applied customizations."""
+        try:
+            # Check if SF Symbols are available (macOS 11.0+)
+            if not hasattr(NSImage, 'imageWithSystemSymbolName_accessibilityDescription_'):
+                _log('SFSymbol: System symbols not available on this macOS version (requires 11.0+)')
+                return None
+
+            # Create base image using the class factory method
+            image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                self.name, self.accessibility_description
+            )
+
+            if image is None:
+                _log(f'SFSymbol: System symbol "{self.name}" not found')
+                return None
+
+            # Apply symbol configuration if we have any customizations
+            config = self._build_configuration()
+            if config and hasattr(image, 'imageWithSymbolConfiguration_'):
+                configured_image = image.imageWithSymbolConfiguration_(config)
+                if configured_image:
+                    image = configured_image
+
+            # Set reasonable default size for statusbar use
+            image.setSize_((20, 20))
+            return image
+
+        except AttributeError:
+            _log('SFSymbol: System symbols not available on this macOS version (requires 11.0+)')
+            return None
+        except Exception as e:
+            _log(f'SFSymbol: Error creating symbol "{self.name}": {e}')
+            return None
+
+    def _build_configuration(self):
+        """Build the complete symbol configuration by combining all requested traits."""
+        if not hasattr(NSImage, 'SymbolConfiguration'):
+            return None
+            
+        try:
+            config = None
+            
+            # 1. Start with size/weight/scale configuration
+            base_config = self._create_size_weight_scale_config()
+            if base_config:
+                config = base_config
+            
+            # 2. Apply rendering mode configuration
+            rendering_config = self._create_rendering_config()
+            if rendering_config:
+                if config:
+                    config = config.configurationByApplyingConfiguration_(rendering_config)
+                else:
+                    config = rendering_config
+            
+            # 3. Apply color configuration
+            color_config = self._create_color_config()
+            if color_config:
+                if config:
+                    config = config.configurationByApplyingConfiguration_(color_config)
+                else:
+                    config = color_config
+            
+            return config
+            
+        except Exception as e:
+            _log(f'SFSymbol: Error creating configuration for "{self.name}": {e}')
+            return None
+
+    def _create_size_weight_scale_config(self):
+        """Create configuration for size, weight, and scale using the correct factory methods."""
+        try:
+            # Point size + weight + scale (macOS 11+)
+            if self.point_size is not None and self.weight is not None:
+                ns_weight = self.WEIGHT_MAP.get(self.weight)
+                if ns_weight is not None:
+                    ns_scale = self.SCALE_MAP.get(self.scale, 0)  # 0 = unspecified
+                    if hasattr(NSImageSymbolConfiguration, 'configurationWithPointSize_weight_scale_'):
+                        return NSImageSymbolConfiguration.configurationWithPointSize_weight_scale_(
+                            float(self.point_size), ns_weight, ns_scale
+                        )
+                    elif hasattr(NSImageSymbolConfiguration, 'configurationWithPointSize_weight_'):
+                        return NSImageSymbolConfiguration.configurationWithPointSize_weight_(
+                            float(self.point_size), ns_weight
+                        )
+            
+            # Text style + scale (macOS 11+)
+            elif self.text_style is not None:
+                # These would need to be the actual NSFont.TextStyle constants
+                text_style_map = {
+                    "body": "NSFontTextStyleBody",
+                    "caption1": "NSFontTextStyleCaption1",
+                    "caption2": "NSFontTextStyleCaption2",
+                    "footnote": "NSFontTextStyleFootnote",
+                    "headline": "NSFontTextStyleHeadline",
+                    "subheadline": "NSFontTextStyleSubheadline",
+                    "title1": "NSFontTextStyleTitle1",
+                    "title2": "NSFontTextStyleTitle2",
+                    "title3": "NSFontTextStyleTitle3"
+                }
+                ns_text_style = text_style_map.get(self.text_style)
+                if ns_text_style:
+                    if self.scale and hasattr(NSImageSymbolConfiguration, 'configurationWithTextStyle_scale_'):
+                        ns_scale = self.SCALE_MAP.get(self.scale)
+                        if ns_scale:
+                            return NSImageSymbolConfiguration.configurationWithTextStyle_scale_(
+                                ns_text_style, ns_scale
+                            )
+                    if hasattr(NSImageSymbolConfiguration, 'configurationWithTextStyle_'):
+                        return NSImageSymbolConfiguration.configurationWithTextStyle_(ns_text_style)
+            
+            # Scale only (macOS 11+)
+            elif self.scale is not None:
+                ns_scale = self.SCALE_MAP.get(self.scale)
+                if ns_scale and hasattr(NSImageSymbolConfiguration, 'configurationWithScale_'):
+                    return NSImageSymbolConfiguration.configurationWithScale_(ns_scale)
+            
+        except Exception as e:
+            _log(f'SFSymbol: Error creating size/weight/scale config: {e}')
+        
+        return None
+
+    def _create_rendering_config(self):
+        """Create rendering mode configuration using the correct factory methods."""
+        if self.rendering == "automatic":
+            return None
+
+        print(hasattr(NSImageSymbolConfiguration, 'configurationWithColorRenderingMode_'))
+        
+        try:
+            # Try convenience methods first (various macOS versions)
+            if self.rendering == "multicolor" and hasattr(NSImageSymbolConfiguration, 'preferringMulticolor'):
+                # macOS 12+
+                return NSImageSymbolConfiguration.preferringMulticolor()
+            elif self.rendering == "monochrome" and hasattr(NSImageSymbolConfiguration, 'preferringMonochrome'):
+                # macOS 16+ (Ventura)
+                return NSImageSymbolConfiguration.preferringMonochrome()
+            elif hasattr(NSImageSymbolConfiguration, 'configurationWithColorRenderingMode_'):
+                print("rendering mode is supported")
+                mode = self.RENDERING_MODE_MAP.get(self.rendering)
+                print(mode)
+                if mode is not None:
+                    return NSImageSymbolConfiguration.configurationWithColorRenderingMode_(mode)
+                    
+        except Exception as e:
+            _log(f'SFSymbol: Error creating rendering config: {e}')
+        
+        return None
+
+    def _create_color_config(self):
+        """Create color configuration using the correct factory methods."""
+        if not self.color:
+            return None
+            
+        try:
+            # Multiple colors for palette mode (macOS 12+)
+            if isinstance(self.color, (list, tuple)) and len(self.color) > 1 and not isinstance(self.color[0], (int, float)):
+                ns_colors = []
+                for color in self.color:
+                    ns_color = self._parse_color(color)
+                    if ns_color:
+                        ns_colors.append(ns_color)
+                if ns_colors and hasattr(NSImageSymbolConfiguration, 'configurationWithPaletteColors_'):
+                    return NSImageSymbolConfiguration.configurationWithPaletteColors_(ns_colors)
+            
+            # Single color
+            else:
+                ns_color = self._parse_color(self.color)
+                if ns_color:
+                    # Hierarchical color (macOS 12+)
+                    if self.rendering == "hierarchical" and hasattr(NSImageSymbolConfiguration, 'configurationWithHierarchicalColor_'):
+                        return NSImageSymbolConfiguration.configurationWithHierarchicalColor_(ns_color)
+                    # Single color as palette (macOS 12+)
+                    elif hasattr(NSImageSymbolConfiguration, 'configurationWithPaletteColors_'):
+                        return NSImageSymbolConfiguration.configurationWithPaletteColors_([ns_color])
+                        
+        except Exception as e:
+            _log(f'SFSymbol: Error creating color config: {e}')
+        
+        return None
+
+    def _parse_color(self, color):
+        """Parse color parameter into NSColor."""
+        try:
+            if isinstance(color, str) and color.startswith('#'):
+                # Parse hex color
+                hex_color = color[1:]
+                if len(hex_color) == 6:
+                    r = int(hex_color[0:2], 16) / 255.0
+                    g = int(hex_color[2:4], 16) / 255.0
+                    b = int(hex_color[4:6], 16) / 255.0
+                    return NSColor.colorWithRed_green_blue_alpha_(r, g, b, 1.0)
+                elif len(hex_color) == 8:
+                    r = int(hex_color[0:2], 16) / 255.0
+                    g = int(hex_color[2:4], 16) / 255.0
+                    b = int(hex_color[4:6], 16) / 255.0
+                    a = int(hex_color[6:8], 16) / 255.0
+                    return NSColor.colorWithRed_green_blue_alpha_(r, g, b, a)
+            elif isinstance(color, (tuple, list)) and len(color) >= 3:
+                # Parse RGB/RGBA tuple
+                r, g, b = color[:3]
+                a = color[3] if len(color) > 3 else 1.0
+                # Normalize values if they appear to be in 0-255 range
+                if any(val > 1.0 for val in [r, g, b]):
+                    r, g, b = r/255.0, g/255.0, b/255.0
+                if a > 1.0:
+                    a = a/255.0
+                return NSColor.colorWithRed_green_blue_alpha_(r, g, b, a)
+        except Exception as e:
+            _log(f'SFSymbol: Error parsing color "{color}": {e}')
+        return None
+
+    def __call__(self):
+        """Return the NSImage for use in rumps components."""
+        return self._nsimage
+
+    def __repr__(self):
+        return f'<SFSymbol: name="{self.name}", rendering="{self.rendering}", color="{self.color}">'
+
+    @staticmethod
+    def named(symbol_name, accessibility_description=None):
+        """Create an NSImage from a system symbol name (legacy method).
+        
+        :param symbol_name: The name of the SF Symbol (e.g., "tortoise", "heart.fill", "gear")
+        :param accessibility_description: Optional accessibility description for the symbol
+        :return: NSImage object that can be used anywhere an image is expected in rumps
+        """
+        symbol = SFSymbol(symbol_name, accessibility_description=accessibility_description)
+        return symbol()
 
 
 # Decorators and helper function serving to register functions for dealing with interaction and events
@@ -317,6 +639,46 @@ def image(*args, **options):
     return decorator
 
 
+def checkbox(*args, **options):
+    """Decorator for registering a function as a callback for a checkbox action on a :class:`rumps.CheckboxMenuItem` within
+    the application. All elements of the provided path will be created as :class:`rumps.MenuItem` objects. The
+    :class:`rumps.CheckboxMenuItem` will be created as a child of the last menu item.
+
+    Accepts the same keyword arguments as :class:`rumps.CheckboxMenuItem`.
+
+    :param args: a series of strings representing the path to a :class:`rumps.CheckboxMenuItem` in the main menu of the
+                 application.
+    """
+    def decorator(f):
+
+        def register_checkbox(self):
+
+            # self not defined yet but will be later in 'run' method
+            menuitem = self._menu
+            if menuitem is None:
+                raise ValueError('no menu created')
+
+            # create here in case of error so we don't create the path
+            checkbox_menu_item = CheckboxMenuItem(**options)
+            checkbox_menu_item.set_callback(f)
+
+            for arg in args:
+                try:
+                    menuitem = menuitem[arg]
+                except KeyError:
+                    menuitem.add(arg)
+                    menuitem = menuitem[arg]
+
+            menuitem.add(checkbox_menu_item)
+
+        # delay registering the checkbox until we have a current instance to be able to traverse the menu
+        buttons = clicked.__dict__.setdefault('*buttons', [])
+        buttons.append(register_checkbox)
+
+        return f
+    return decorator
+
+
 def list_menu(*args, **options):
     """Decorator for registering a function as a callback for a list selection action on a :class:`rumps.ListMenuItem` within
     the application. All elements of the provided path will be created as :class:`rumps.MenuItem` objects. The
@@ -420,7 +782,7 @@ class Menu(ListDict):
         if key not in self:
             key, value = self._process_new_menuitem(key, value)
             self._menu.addItem_(value._menuitem)
-            if isinstance(value, (SliderMenuItem, TextFieldMenuItem, ImageMenuItem, ListMenuItem, ListView, CardMenuItem)):
+            if isinstance(value, (SliderMenuItem, TextFieldMenuItem, ImageMenuItem, ListMenuItem, ListView, CardMenuItem, ProgressBarMenuItem, CircularProgressMenuItem)):
                 self._set_subview_dimensions(self, value)
             super(Menu, self).__setitem__(key, value)
 
@@ -503,7 +865,7 @@ class Menu(ListDict):
                 # menu item / could be visual separator where ele is None or separator
                 else:
                     menu.add(ele)
-                    if isinstance(ele, (SliderMenuItem, TextFieldMenuItem, ImageMenuItem, ListMenuItem, ListView, CardMenuItem)):
+                    if isinstance(ele, (SliderMenuItem, TextFieldMenuItem, ImageMenuItem, ListMenuItem, ListView, CardMenuItem, ProgressBarMenuItem, CircularProgressMenuItem)):
                         self._set_subview_dimensions(menu, ele)
         parse_menu(iterable, self, 0)
         parse_menu(kwargs, self, 0)
@@ -537,7 +899,7 @@ class Menu(ListDict):
         existing_menuitem = self[existing_key]
         index = self._menu.indexOfItem_(existing_menuitem._menuitem)
         self._menu.insertItem_atIndex_(menuitem._menuitem, index + pos)
-        if isinstance(menuitem, (SliderMenuItem, TextFieldMenuItem, ImageMenuItem, ListMenuItem, ListView, CardMenuItem)):
+        if isinstance(menuitem, (SliderMenuItem, TextFieldMenuItem, ImageMenuItem, ListMenuItem, ListView, CardMenuItem, ProgressBarMenuItem, CircularProgressMenuItem)):
             self._set_subview_dimensions(self, menuitem)
 
     # Processing MenuItems
@@ -1395,6 +1757,476 @@ class ListView(object):
         self.set_items(new_items)
 
 
+class ProgressBarMenuItem(object):
+    """Represents a progress bar menu item within the application's menu.
+
+    A horizontal progress bar that can show determinate or indeterminate progress.
+    Useful for displaying download progress, task completion, or other time-based operations.
+
+    :param value: current progress value (0.0 to 1.0 for determinate, ignored for indeterminate).
+    :param indeterminate: whether to show indeterminate (spinning) progress. Default is False.
+    :param dimensions: a sequence of numbers whose length is two, specifying the dimensions of the progress bar.
+    :param show_text: whether to show percentage text on the progress bar. Default is True.
+    :param color: color of the progress bar (hex string or RGB tuple). Default is system accent color.
+    """
+
+    def __init__(self, value=0.0, indeterminate=False, dimensions=(200, 20), show_text=True, color=None):
+        from AppKit import NSProgressIndicator, NSTextField, NSColor, NSFont
+
+        self._value = max(0.0, min(1.0, value))
+        self._indeterminate = indeterminate
+        self._dimensions = dimensions
+        self._show_text = show_text
+        self._color = color
+
+        width, height = dimensions
+
+        # Create the container view
+        self._view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height + 10))
+
+        # Create progress indicator
+        progress_height = min(height, 16)  # Progress bars work best at standard height
+        progress_y = (height + 10 - progress_height) // 2
+
+        self._progress = NSProgressIndicator.alloc().initWithFrame_(
+            NSMakeRect(5, progress_y, width - 10, progress_height)
+        )
+
+        # Configure progress indicator
+        self._progress.setStyle_(0)  # NSProgressIndicatorBarStyle
+        self._progress.setIndeterminate_(indeterminate)
+
+        if indeterminate:
+            self._progress.startAnimation_(None)
+        else:
+            self._progress.setMinValue_(0.0)
+            self._progress.setMaxValue_(1.0)
+            self._progress.setDoubleValue_(self._value)
+
+        # Set custom color if provided
+        if color:
+            try:
+                ns_color = self._parse_color(color)
+                if ns_color:
+                    # Try to set the color (may not work on all macOS versions)
+                    try:
+                        self._progress.setControlTint_(1)  # Use color tint if possible
+                    except:
+                        pass
+            except:
+                pass
+
+        self._view.addSubview_(self._progress)
+
+        # Add percentage text if requested
+        self._text_field = None
+        if show_text and not indeterminate:
+            text_height = 12
+            text_y = max(0, (height + 10 - text_height) // 2)
+
+            self._text_field = NSTextField.alloc().initWithFrame_(
+                NSMakeRect(width, text_y, 35, text_height)
+            )
+            self._text_field.setEditable_(False)
+            self._text_field.setSelectable_(False)
+            self._text_field.setBordered_(False)
+            self._text_field.setDrawsBackground_(False)
+            self._text_field.setAlignment_(2)  # NSTextAlignmentRight
+            self._text_field.setFont_(NSFont.systemFontOfSize_(10))
+            self._text_field.setTextColor_(NSColor.secondaryLabelColor())
+
+            self._update_text()
+            self._view.addSubview_(self._text_field)
+
+        # Set up the menu item
+        self._menuitem = NSMenuItem.alloc().init()
+        self._menuitem.setTarget_(NSApp)
+        self._menuitem.setView_(self._view)
+
+    def _parse_color(self, color):
+        """Parse color parameter into NSColor (reuse from SFSymbol)."""
+        try:
+            if isinstance(color, str) and color.startswith('#'):
+                hex_color = color[1:]
+                if len(hex_color) == 6:
+                    r = int(hex_color[0:2], 16) / 255.0
+                    g = int(hex_color[2:4], 16) / 255.0
+                    b = int(hex_color[4:6], 16) / 255.0
+                    return NSColor.colorWithRed_green_blue_alpha_(r, g, b, 1.0)
+            elif isinstance(color, (tuple, list)) and len(color) >= 3:
+                r, g, b = color[:3]
+                a = color[3] if len(color) > 3 else 1.0
+                if any(val > 1.0 for val in [r, g, b]):
+                    r, g, b = r/255.0, g/255.0, b/255.0
+                if a > 1.0:
+                    a = a/255.0
+                return NSColor.colorWithRed_green_blue_alpha_(r, g, b, a)
+        except Exception:
+            pass
+        return None
+
+    def _update_text(self):
+        """Update the percentage text display."""
+        if self._text_field and not self._indeterminate:
+            percentage = int(self._value * 100)
+            self._text_field.setStringValue_(f"{percentage}%")
+
+    def __repr__(self):
+        return '<{0}: [value: {1}; indeterminate: {2}]>'.format(
+            type(self).__name__,
+            self._value if not self._indeterminate else "N/A",
+            self._indeterminate
+        )
+
+    @property
+    def value(self):
+        """The current progress value (0.0 to 1.0)."""
+        return self._value
+
+    @value.setter
+    def value(self, new_value):
+        if not self._indeterminate:
+            self._value = max(0.0, min(1.0, new_value))
+            self._progress.setDoubleValue_(self._value)
+            self._update_text()
+
+    @property
+    def indeterminate(self):
+        """Whether the progress bar is in indeterminate mode."""
+        return self._indeterminate
+
+    @indeterminate.setter
+    def indeterminate(self, is_indeterminate):
+        self._indeterminate = is_indeterminate
+        self._progress.setIndeterminate_(is_indeterminate)
+
+        if is_indeterminate:
+            self._progress.startAnimation_(None)
+            if self._text_field:
+                self._text_field.setHidden_(True)
+        else:
+            self._progress.stopAnimation_(None)
+            self._progress.setDoubleValue_(self._value)
+            if self._text_field:
+                self._text_field.setHidden_(False)
+                self._update_text()
+
+    def start_animation(self):
+        """Start animation for indeterminate progress."""
+        if self._indeterminate:
+            self._progress.startAnimation_(None)
+
+    def stop_animation(self):
+        """Stop animation for indeterminate progress."""
+        if self._indeterminate:
+            self._progress.stopAnimation_(None)
+
+
+class CircularProgressView(NSView):
+    """Custom view that draws a circular progress indicator using AppKit."""
+
+    def initWithFrame_value_color_lineWidth_(self, frame, value, color, line_width):
+        self = objc.super(CircularProgressView, self).initWithFrame_(frame)
+        if self:
+            self._value = float(value) if value is not None else 0.0   # 0..1
+            self._color = color or NSColor.colorWithSRGBRed_green_blue_alpha_(0x7F/255.0, 0x84/255.0, 0x8A/255.0, 1.0)
+            self._line_width = max(2.0, float(line_width) if line_width else 8.0)
+            self.setWantsLayer_(True)  # smoother on HiDPI
+        return self
+
+    def drawRect_(self, _rect):
+        # Geometry
+        bounds = self.bounds()
+        w, h = bounds.size.width, bounds.size.height
+        cx, cy = w * 0.5, h * 0.5
+        # Use half the stroke so the ring stays inside the view
+        radius = max(0.0, min(w, h) * 0.5 - self._line_width * 0.5)
+        if radius <= 0:
+            return
+
+        # --- Track (background ring) ---
+        track = NSBezierPath.bezierPath()
+        track.setLineWidth_(self._line_width)
+        track.appendBezierPathWithOvalInRect_(NSMakeRect(cx - radius, cy - radius, radius * 2, radius * 2))
+        NSColor.colorWithCalibratedWhite_alpha_(0.17, 1.0).set()  # light gray
+        track.stroke()
+
+        # --- Progress arc ---
+        v = max(0.0, min(1.0, float(self._value)))
+        if v > 0.0:
+            start_deg = 90.0                      # 12 o'clock
+            end_deg = start_deg - (v * 360.0)     # clockwise
+            arc = NSBezierPath.bezierPath()
+            arc.setLineWidth_(self._line_width)
+            arc.setLineCapStyle_(NSRoundLineCapStyle)
+            # IMPORTANT: angles are in DEGREES (do NOT convert to radians)
+            arc.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
+                NSMakePoint(cx, cy), radius, start_deg, end_deg, True
+            )
+            (self._color or NSColor.systemBlueColor()).set()
+            arc.stroke()
+
+    # Public setters
+    def setValue_(self, value):
+        self._value = max(0.0, min(1.0, float(value)))
+        self.setNeedsDisplay_(True)
+
+    def setColor_(self, color):
+        self._color = color
+        self.setNeedsDisplay_(True)
+
+
+class CircularProgressMenuItem(object):
+    """Represents a circular progress indicator menu item within the application's menu.
+
+    A circular progress indicator that can show determinate or indeterminate progress.
+    Useful for compact progress display or when you want a more modern look.
+
+    :param value: current progress value (0.0 to 1.0 for determinate, ignored for indeterminate).
+    :param indeterminate: whether to show indeterminate (spinning) progress. Default is False.
+    :param dimensions: a sequence of numbers whose length is two, specifying the dimensions of the container.
+    :param color: color of the progress indicator (hex string or RGB tuple). Default is system accent color.
+    :param line_width: width of the progress circle line. Default is 3.0.
+    """
+
+    def __init__(self, value=0.0, indeterminate=False, dimensions=(40, 40), color=None, line_width=3.0):
+        from AppKit import NSProgressIndicator
+
+        self._value = max(0.0, min(1.0, value))
+        self._indeterminate = indeterminate
+        self._dimensions = dimensions
+        self._color = color
+        self._line_width = line_width
+
+        width, height = dimensions
+
+        # Create the container view
+        self._view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
+
+        if indeterminate:
+            # Use NSProgressIndicator for indeterminate (spinning) mode
+            size = min(width - 4, height - 4)
+            x = (width - size) // 2
+            y = (height - size) // 2
+
+            self._progress = NSProgressIndicator.alloc().initWithFrame_(
+                NSMakeRect(x, y, size, size)
+            )
+            self._progress.setStyle_(1)  # 1 = NSProgressIndicatorSpinningStyle | 0 = ProgressBar
+            self._progress.setDisplayedWhenStopped_(True)
+            self._progress.setUsesThreadedAnimation_(True)
+            self._progress.setIndeterminate_(True)
+            self._progress.startAnimation_(None)
+
+            self._view.addSubview_(self._progress)
+            self._custom_view = None
+        else:
+            # Use custom view for determinate progress to avoid visual artifacts
+            ns_color = self._parse_color(color) if color else None
+
+            self._custom_view = CircularProgressView.alloc().initWithFrame_value_color_lineWidth_(
+                NSMakeRect(2, 2, width - 4, height - 4),
+                self._value,
+                ns_color,
+                line_width
+            )
+            self._view.addSubview_(self._custom_view)
+            self._progress = None
+
+        # Set up the menu item
+        self._menuitem = NSMenuItem.alloc().init()
+        self._menuitem.setTarget_(NSApp)
+        self._menuitem.setView_(self._view)
+
+    def _parse_color(self, color):
+        """Parse color parameter into NSColor (reuse from SFSymbol)."""
+        try:
+            if isinstance(color, str) and color.startswith('#'):
+                hex_color = color[1:]
+                if len(hex_color) == 6:
+                    r = int(hex_color[0:2], 16) / 255.0
+                    g = int(hex_color[2:4], 16) / 255.0
+                    b = int(hex_color[4:6], 16) / 255.0
+                    return NSColor.colorWithRed_green_blue_alpha_(r, g, b, 1.0)
+            elif isinstance(color, (tuple, list)) and len(color) >= 3:
+                r, g, b = color[:3]
+                a = color[3] if len(color) > 3 else 1.0
+                if any(val > 1.0 for val in [r, g, b]):
+                    r, g, b = r/255.0, g/255.0, b/255.0
+                if a > 1.0:
+                    a = a/255.0
+                return NSColor.colorWithRed_green_blue_alpha_(r, g, b, a)
+        except Exception:
+            pass
+        return None
+
+    def __repr__(self):
+        return '<{0}: [value: {1}; indeterminate: {2}]>'.format(
+            type(self).__name__,
+            self._value if not self._indeterminate else "N/A",
+            self._indeterminate
+        )
+
+    @property
+    def value(self):
+        """The current progress value (0.0 to 1.0)."""
+        return self._value
+
+    @value.setter
+    def value(self, new_value):
+        if not self._indeterminate:
+            self._value = max(0.0, min(1.0, new_value))
+            if self._custom_view:
+                # Update custom view for determinate progress
+                self._custom_view.setValue_(self._value)
+            elif self._progress:
+                # Update NSProgressIndicator if being used
+                self._progress.setDoubleValue_(self._value)
+
+    @property
+    def indeterminate(self):
+        """Whether the progress indicator is in indeterminate mode."""
+        return self._indeterminate
+
+    @indeterminate.setter
+    def indeterminate(self, is_indeterminate):
+        if self._indeterminate == is_indeterminate:
+            return  # No change needed
+
+        self._indeterminate = is_indeterminate
+
+        # Remove current view
+        if self._progress:
+            self._progress.removeFromSuperview()
+            self._progress = None
+        if self._custom_view:
+            self._custom_view.removeFromSuperview()
+            self._custom_view = None
+
+        # Recreate with new mode
+        width, height = self._dimensions
+
+        if is_indeterminate:
+            # Switch to NSProgressIndicator for spinning animation
+            from AppKit import NSProgressIndicator
+
+            size = min(width - 4, height - 4)
+            x = (width - size) // 2
+            y = (height - size) // 2
+
+            self._progress = NSProgressIndicator.alloc().initWithFrame_(
+                NSMakeRect(x, y, size, size)
+            )
+            self._progress.setStyle_(1)  # NSProgressIndicatorSpinningStyle
+            self._progress.setDisplayedWhenStopped_(True)
+            self._progress.setUsesThreadedAnimation_(True)
+            self._progress.setIndeterminate_(True)
+            self._progress.startAnimation_(None)
+
+            self._view.addSubview_(self._progress)
+        else:
+            # Switch to custom view for determinate progress
+            ns_color = self._parse_color(self._color) if self._color else None
+
+            self._custom_view = CircularProgressView.alloc().initWithFrame_value_color_lineWidth_(
+                NSMakeRect(2, 2, width - 4, height - 4),
+                self._value,
+                ns_color,
+                self._line_width
+            )
+            self._view.addSubview_(self._custom_view)
+
+    def start_animation(self):
+        """Start animation for indeterminate progress."""
+        if self._indeterminate and self._progress:
+            self._progress.startAnimation_(None)
+
+    def stop_animation(self):
+        """Stop animation for indeterminate progress."""
+        if self._indeterminate and self._progress:
+            self._progress.stopAnimation_(None)
+
+
+class CheckboxMenuItem(object):
+    """Represents a checkbox menu item within the application's menu.
+
+    A checkbox that can be checked/unchecked, useful for settings, feature flags,
+    or boolean options. Uses native macOS checkbox styling.
+
+    :param title: the text label for the checkbox.
+    :param checked: whether the checkbox starts checked. Default is False.
+    :param callback: the function serving as callback for when the checkbox is clicked.
+    """
+
+    def __init__(self, title="Checkbox", checked=False, callback=None):
+        self._title = title
+        self._checked = checked
+        self._callback = callback
+
+        # Set up the menu item using native NSMenuItem state
+        self._menuitem = NSMenuItem.alloc().init()
+        self._menuitem.setTitle_(title)
+        self._menuitem.setTarget_(NSApp)
+        self._menuitem.setAction_('checkboxCallback:')
+
+        # Set initial state
+        self._update_state()
+
+        # Register callback
+        NSApp._ns_to_py_and_callback[self._menuitem] = self, callback
+
+    def _update_state(self):
+        """Update the visual state of the checkbox."""
+        # Use native NSMenuItem state for checkmarks
+        # NSOnState = 1 (checked), NSOffState = 0 (unchecked)
+        self._menuitem.setState_(1 if self._checked else 0)
+
+    def __repr__(self):
+        return '<{0}: [title: {1}; checked: {2}; callback: {3}]>'.format(
+            type(self).__name__,
+            repr(self._title),
+            self._checked,
+            repr(self.callback)
+        )
+
+    @property
+    def title(self):
+        """The text label of the checkbox."""
+        return self._title
+
+    @title.setter
+    def title(self, new_title):
+        self._title = new_title
+        self._menuitem.setTitle_(new_title)
+
+    @property
+    def checked(self):
+        """The current state of the checkbox (True for checked, False for unchecked)."""
+        return self._checked
+
+    @checked.setter
+    def checked(self, new_checked):
+        self._checked = bool(new_checked)
+        self._update_state()
+
+    def toggle(self):
+        """Toggle the current checked state."""
+        self.checked = not self._checked
+
+    def set_callback(self, callback):
+        """Set the function serving as callback for when the checkbox is clicked.
+
+        :param callback: the function to be called when the user clicks the checkbox.
+        """
+        self._callback = callback
+        NSApp._ns_to_py_and_callback[self._menuitem] = self, callback
+
+    @property
+    def callback(self):
+        """Return the current callback function."""
+        return NSApp._ns_to_py_and_callback.get(self._menuitem, (None, None))[1]
+
+
 class CardMenuItem(object):
     """Represents a card-style menu item with leading icon and title text.
 
@@ -1964,6 +2796,18 @@ class NSApp(NSObject):
     def imageCallback_(cls, nsimageview):
         """Callback for ImageMenuItem when image is clicked."""
         self, callback = cls._ns_to_py_and_callback[nsimageview]
+        _log(self)
+        try:
+            return _internal.call_as_function_or_method(callback, self)
+        except Exception:
+            traceback.print_exc()
+
+    @classmethod
+    def checkboxCallback_(cls, nsmenuitem):
+        """Callback for CheckboxMenuItem when checkbox is clicked."""
+        self, callback = cls._ns_to_py_and_callback[nsmenuitem]
+        # Toggle the checked state
+        self.toggle()
         _log(self)
         try:
             return _internal.call_as_function_or_method(callback, self)

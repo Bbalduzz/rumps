@@ -21,7 +21,7 @@ class ImageOnlyApp(rumps.App):
         )
 
         # Create the image
-        self.image_path = "/Users/edoardobalducci/Documents/work/rumps/examples/pony.jpg"
+        self.image_path = "/Users/edoardobalducci/Documents/work/rumps/examples/level_4.png"
 
         if self.image_path:
             print(f"Using image: {self.image_path}")
@@ -38,11 +38,18 @@ class ImageOnlyApp(rumps.App):
             image_item = rumps.ImageMenuItem(
                 image_path=self.image_path,
                 callback=self.on_image_click,
-                scale_mode='fit'
+                dimensions=(200, 200),
+                scale_mode='fill'
             )
 
-            # Menu contains ONLY the image
-            self.menu = [image_item]
+            # Create a menu item with SF Symbol icon
+            turtle_item = rumps.MenuItem("Turtle Item")
+            turtle_icon = rumps.SFSymbol.named("turtle")
+            if turtle_icon:
+                turtle_item.set_icon(turtle_icon)
+
+            # Menu contains the image and the SF Symbol menu item
+            self.menu = [image_item, turtle_item]
 
         else:
             # Fallback if no image is available
